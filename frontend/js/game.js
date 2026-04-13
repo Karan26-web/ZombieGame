@@ -640,12 +640,6 @@ class GameScene extends Phaser.Scene {
       },
     });
 
-    // Walk bobbing tween — values are relative to ZOMBIE_SCALE base
-    this.walkTween = this.tweens.add({
-      targets:this.zombie, scaleX:ZOMBIE_SCALE * 1.04, scaleY:ZOMBIE_SCALE * 0.97,
-      duration:150, yoyo:true, repeat:-1, ease:'Sine.easeInOut',
-    });
-
     // HUD
     const hs = { fontFamily:'"Courier New",monospace', fontSize:'11px',
       color:'#f0c040', stroke:'#000000', strokeThickness:3 };
@@ -805,7 +799,6 @@ class GameScene extends Phaser.Scene {
       this.jumpsUsed++;
       this.coyote = 0;
       this.supportPlat = null;
-      this.walkTween.pause();
       Sfx.jump();
       this.tweens.add({ targets:this.zombie, scaleY:ZOMBIE_SCALE*1.18, scaleX:ZOMBIE_SCALE*0.86, duration:80, yoyo:true, ease:'Back.easeOut' });
     }
@@ -943,10 +936,6 @@ class GameScene extends Phaser.Scene {
       this.supportPlat = null;
     }
 
-    const grounded = this._isGrounded();
-    if ( grounded && !this.walkTween.isPlaying()) this.walkTween.resume();
-    if (!grounded &&  this.walkTween.isPlaying()) this.walkTween.pause();
-
     // ── Score ─────────────────────────────────────────────────────────────
     this.dist += this.speed * dt;
     this.score = Math.floor(this.dist / 8) + this.coins * COIN_VAL;
@@ -965,7 +954,6 @@ class GameScene extends Phaser.Scene {
     if (this.over) return;
     this.over = true;
     this.diffTimer.remove();
-    this.walkTween.stop();
     if (sessionId) {
       void apiPost(`/sessions/${sessionId}/end`, {
         score:this.score,
