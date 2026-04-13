@@ -22,10 +22,10 @@ const JUMP_VEL = -760;
 const AIR_TIME = (2 * 760) / 1500;  // ≈ 1.013 s
 
 // ─── SPEED / DIFFICULTY ──────────────────────────────────────────────────────
-const INIT_SPD = 220;
-const MAX_SPD  = 540;
-const SPD_STEP = 18;
-const DIFF_MS  = 5000;
+const INIT_SPD = 190;
+const MAX_SPD  = 420;
+const SPD_STEP = 12;
+const DIFF_MS  = 6500;
 
 // ─── LAYOUT ──────────────────────────────────────────────────────────────────
 const PLAYER_X = 130;
@@ -33,8 +33,24 @@ const TILE_W   = 200;
 const CAP_H    = 14;
 const DIRT_H   = 44;
 const PLAT_H   = CAP_H + DIRT_H;        // 58 px total
-const GAP_MIN  = 80;
+const GAP_MIN  = 68;
 const GROUND_Y = Math.round(H * 0.73);  // ≈ 307
+const INPUT_GRACE_MS = 260;
+const MAX_FRAME_MS   = 34;
+const OVERLAY_WORDMARK_W = 420;
+
+// ─── LAND ELEMENT SPRITES ────────────────────────────────────────────────────
+// Each entry: image size (iw×ih) and the Y-fraction where the grass cap starts.
+// At LAND_SCALE, rw = rendered width used for physics body width.
+const LAND_SCALE = 0.2;
+const LAND_CFGS = {
+  land1: { iw:1508, ih:608, capFrac:145/608 },   // floating platform w/ sign/tombstone/tree
+  land4: { iw:1613, ih:666, capFrac:165/666 },   // floating platform w/ sign/skull/bush
+};
+Object.values(LAND_CFGS).forEach(c => {
+  c.rw = Math.round(c.iw * LAND_SCALE);
+  c.rh = Math.round(c.ih * LAND_SCALE);
+});
 
 // ─── COINS ───────────────────────────────────────────────────────────────────
 const COIN_VAL    = 10;
@@ -146,8 +162,18 @@ async function apiGet(path) {
 function loadImageElement(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.decoding = 'async';
-    img.onload = () => resolve(img);
+    img.onload = () => {
+      // img.decode() waits for pixel data to be fully rasterised before we
+      // hand the element to Phaser's WebGL texture manager.  Without this,
+      // textures.addImage() received undecoded image data and silently
+      // produced an empty/missing texture, crashing the try-block in
+      // BootScene.create() before buildTextures() ever ran.
+      if (typeof img.decode === 'function') {
+        img.decode().then(() => resolve(img), () => resolve(img));
+      } else {
+        resolve(img);
+      }
+    };
     img.onerror = () => reject(new Error(src));
     img.src = src;
   });
@@ -166,32 +192,44 @@ async function loadImageWithFallback(name, sources) {
 }
 
 function getAssetSources() {
+  // If embedded data URIs are present, try them first. Otherwise fall back
+  // to the real PNG files in frontend/assets.
+  const globals = typeof window !== 'undefined' ? window : globalThis;
+  const uri = (name) => (typeof globals[name] !== 'undefined' ? globals[name] : null);
   return {
-    bg: [
-      'assets/background.png',
-      typeof ASSET_BG !== 'undefined' ? ASSET_BG : null,
-    ].filter(Boolean),
-    zombie: [
-      'assets/Zombie.png',
-      typeof ASSET_ZOMBIE !== 'undefined' ? ASSET_ZOMBIE : null,
-    ].filter(Boolean),
+    bg:          [uri('ASSET_BG'),       'assets/background.png'  ].filter(Boolean),
+    zombie:      [uri('ASSET_ZOMBIE'),   'assets/Zombie.png'      ].filter(Boolean),
+    land1:       [uri('ASSET_LAND1'),    'assets/landElement1.png'].filter(Boolean),
+    land4:       [uri('ASSET_LAND4'),    'assets/landElement4.png'].filter(Boolean),
+    getReadyImg: [uri('ASSET_GETREADY'), 'assets/getReadyText.png'].filter(Boolean),
+    gameOverImg: [uri('ASSET_GAMEOVER'), 'assets/gameOverText.png'].filter(Boolean),
   };
 }
 
 async function prepareGameAssets() {
   if (preparedAssets) return preparedAssets;
   if (!preparedAssetsPromise) {
-    const sources = getAssetSources();
-    preparedAssetsPromise = Promise.all([
-      loadImageWithFallback('background', sources.bg),
-      loadImageWithFallback('zombie', sources.zombie),
-    ]).then(([bg, zombie]) => {
-      preparedAssets = { bg, zombie };
+    preparedAssetsPromise = (async () => {
+      const sources = getAssetSources();
+
+      // bg + zombie are required; throws if every source fails
+      const [bg, zombie] = await Promise.all([
+        loadImageWithFallback('background', sources.bg),
+        loadImageWithFallback('zombie',     sources.zombie),
+      ]);
+
+      // Optional assets – null on failure (game degrades gracefully)
+      const optKeys = ['land1', 'land4', 'getReadyImg', 'gameOverImg'];
+      const settled  = await Promise.allSettled(
+        optKeys.map(k => loadImageWithFallback(k, sources[k]))
+      );
+      const opts = Object.fromEntries(
+        optKeys.map((k, i) => [k, settled[i].status === 'fulfilled' ? settled[i].value : null])
+      );
+
+      preparedAssets = { bg, zombie, ...opts };
       return preparedAssets;
-    }).catch((err) => {
-      preparedAssetsPromise = null;
-      throw err;
-    });
+    })().catch(err => { preparedAssetsPromise = null; throw err; });
   }
   return preparedAssetsPromise;
 }
@@ -288,7 +326,66 @@ function buildTextures(scene) {
   g.fillRect(9,3,2,14); g.fillRect(5,7,10,2); g.fillRect(5,11,10,2);
   g.generateTexture('coin', 20, 20);
 
+  /* TERRAIN FILL  96 × 96 */
+  g.clear();
+  g.fillStyle(0x6f4526); g.fillRect(0, 0, 96, 96);
+  g.fillStyle(0x4a2710, 0.95);
+  [[8,10,18,8],[28,20,14,9],[55,13,17,10],[74,26,15,10],[18,42,13,8],
+   [42,36,18,11],[70,48,20,12],[10,68,17,10],[34,72,14,9],[58,66,16,10],[80,78,13,8]]
+    .forEach(([x,y,w,h]) => g.fillEllipse(x, y, w, h));
+  g.fillStyle(0x8c5a37, 0.9);
+  [[14,24,8,5],[37,11,7,5],[63,31,8,5],[81,16,7,5],[24,56,8,5],[52,51,7,5],[76,60,8,5]]
+    .forEach(([x,y,w,h]) => g.fillEllipse(x, y, w, h));
+  g.fillStyle(0x2f180a, 0.55); g.fillRect(0, 0, 96, 8);
+  g.generateTexture('terrainFill', 96, 96);
+
   g.destroy();
+}
+
+function getChunkBottomY(topY, landKey = null) {
+  if (landKey && LAND_CFGS[landKey]) {
+    const cfg = LAND_CFGS[landKey];
+    return topY + (cfg.rh * (1 - cfg.capFrac));
+  }
+  return topY + PLAT_H;
+}
+
+function createChunkVisual(scene, { leftX, topY, width, landKey = null, fillDepth = 0, fillInset = 14, depth = 3, alpha = 1 }) {
+  const visuals = [];
+  let top;
+
+  if (landKey && scene.textures.exists(landKey)) {
+    const cfg = LAND_CFGS[landKey];
+    top = scene.add.image(leftX, topY, landKey)
+      .setOrigin(0, cfg.capFrac)
+      .setScale(LAND_SCALE)
+      .setDepth(depth)
+      .setAlpha(alpha);
+  } else {
+    landKey = null;
+    top = scene.add.tileSprite(leftX, topY, width, PLAT_H, 'platform')
+      .setOrigin(0, 0)
+      .setDepth(depth)
+      .setAlpha(alpha);
+  }
+  visuals.push({ sprite: top, offsetX: 0 });
+
+  const baseBottom = getChunkBottomY(topY, landKey);
+  if (fillDepth > 0) {
+    const inset = Math.min(fillInset, Math.max(10, Math.floor(width * 0.18)));
+    const fillWidth = Math.max(48, width - (inset * 2));
+    const fill = scene.add.tileSprite(leftX + inset, baseBottom - 6, fillWidth, fillDepth, 'terrainFill')
+      .setOrigin(0, 0)
+      .setDepth(depth - 1)
+      .setAlpha(alpha);
+    const underShadow = scene.add.rectangle(leftX + (width / 2), baseBottom - 4, width * 0.9, 16, 0x000000, 0.16)
+      .setOrigin(0.5, 0.5)
+      .setDepth(depth - 0.5);
+    visuals.push({ sprite: fill, offsetX: inset });
+    visuals.push({ sprite: underShadow, offsetX: width / 2 });
+  }
+
+  return { top, visuals, bottomY: baseBottom + fillDepth };
 }
 
 // ─── SHARED BACKGROUND ───────────────────────────────────────────────────────
@@ -315,24 +412,50 @@ const LANDING_TOL = 18;
 // ─── BOOT SCENE ──────────────────────────────────────────────────────────────
 class BootScene extends Phaser.Scene {
   constructor() { super({ key:'BootScene' }); }
+
   preload() {
-    var d = document.getElementById('diag');
-    if (d) d.textContent = 'boot:preload';
+    const d = document.getElementById('diag');
+    const sources = getAssetSources();
+
+    if (d) d.textContent = 'boot:loading';
+    this.load.on('progress', (value) => {
+      if (d) d.textContent = 'boot:loading ' + Math.round(value * 100) + '%';
+    });
+
+    // Load from embedded data URLs first so file:// and localhost behave
+    // the same way without depending on pre-decoded <img> elements.
+    this.load.image('bg', sources.bg[0]);
+    this.load.image('zombie', sources.zombie[0]);
+    ['land1', 'land4', 'getReadyImg', 'gameOverImg'].forEach((key) => {
+      if (sources[key]?.[0]) this.load.image(key, sources[key][0]);
+    });
   }
+
   create() {
     var d = document.getElementById('diag');
     if (d) d.textContent = 'boot:create';
+    let bootOk = false;
     try {
-      if (!preparedAssets?.bg || !preparedAssets?.zombie) {
-        throw new Error('assets missing');
+      if (!this.textures.exists('bg') || !this.textures.exists('zombie')) {
+        throw new Error('Required textures failed to load');
       }
-      this.textures.addImage('bg', preparedAssets.bg);
-      this.textures.addImage('zombie', preparedAssets.zombie);
       buildTextures(this);
+      bootOk = true;
     } catch (e) {
       if (d) d.textContent = 'tex-err:' + (e.message || String(e)).slice(0, 60);
-      console.error('buildTextures failed:', e);
+      console.error('BootScene.create failed:', e);
+      this.cameras.main.setBackgroundColor('#03040b');
+      this.add.text(W / 2, H / 2, 'Boot failed\nReload the page', {
+        fontFamily:'"Courier New",monospace',
+        fontSize:'26px',
+        fontStyle:'bold',
+        color:'#f0c040',
+        align:'center',
+        stroke:'#000',
+        strokeThickness:6,
+      }).setOrigin(0.5);
     }
+    if (!bootOk) return;
     if (d) d.textContent = 'boot->menu';
     this.scene.start('MenuScene');
   }
@@ -343,73 +466,70 @@ class MenuScene extends Phaser.Scene {
   constructor() { super({ key:'MenuScene' }); }
 
   create() {
+    this.starting = false;
     var d = document.getElementById('diag');
     if (d) d.textContent = 'menu:create';
     try {
       addBackground(this);
       if (d) d.textContent = 'menu:bg';
 
-      // Ground strip
-      this.add.tileSprite(0, GROUND_Y, W, PLAT_H, 'platform').setOrigin(0,0);
+      const wide1 = this.textures.exists('land1') ? LAND_CFGS.land1.rw : 320;
+      const wide4 = this.textures.exists('land4') ? LAND_CFGS.land4.rw : 330;
+      [
+        { leftX:-12, topY:250, width:150, fillDepth:170, depth:4 },
+        { leftX:208, topY:156, width:wide1, landKey:'land1', fillDepth:30, depth:4 },
+        { leftX:430, topY:320, width:wide4, landKey:'land4', fillDepth:78, depth:4 },
+        { leftX:664, topY:114, width:wide4, landKey:'land4', fillDepth:92, depth:4 },
+      ].forEach((cfg) => createChunkVisual(this, cfg));
 
-      // Decorative tombstones on ground
-      this.add.image(W * 0.08, GROUND_Y - 2, 'tombstone').setOrigin(0.5, 1).setScale(0.9);
-      this.add.image(W * 0.88, GROUND_Y - 2, 'tombstone').setOrigin(0.5, 1).setScale(1.1);
-      this.add.image(W * 0.76, GROUND_Y - 2, 'skull').setOrigin(0.5, 1).setScale(1.1);
+      this.add.image(78, 248, 'bush').setOrigin(0.5, 1).setScale(1.05).setDepth(5);
+      this.add.image(104, 248, 'tombstone').setOrigin(0.5, 1).setScale(1.02).setDepth(5);
       if (d) d.textContent = 'menu:ground';
 
-      // Semi-transparent dark panel behind title area
-      const panel = this.add.rectangle(W/2, H * 0.38, 380, 240, 0x000000, 0.55);
-      panel.setStrokeStyle(2, 0x4dba88, 0.7);
-
-      // Title
-      const title = this.add.text(W/2, H * 0.14, '☠  ZOMBIE HOP  ☠', {
-        fontFamily:'"Courier New",monospace', fontSize:'30px', fontStyle:'bold',
-        color:'#f0c040', stroke:'#000', strokeThickness:6,
-        shadow:{offsetX:2,offsetY:4,color:'#7a3600',fill:true},
-      }).setOrigin(0.5);
+      const title = this.add.text(18, 18, 'ZOMBIE HOP', {
+        fontFamily:'"Courier New",monospace', fontSize:'18px', fontStyle:'bold',
+        color:'#f0c040', stroke:'#000', strokeThickness:5,
+      }).setOrigin(0, 0).setDepth(20);
       if (d) d.textContent = 'menu:title';
 
-      this.add.text(W/2, H * 0.26, 'Infinite Platformer', {
-        fontFamily:'"Courier New",monospace', fontSize:'13px', color:'#7de8c0',
-        stroke:'#000', strokeThickness:3,
-      }).setOrigin(0.5);
+      this.add.text(20, 42, 'graveyard run', {
+        fontFamily:'"Courier New",monospace', fontSize:'9px', color:'#7de8c0',
+      }).setOrigin(0, 0).setDepth(20);
 
-      // PLAY button
-      const btn = this.add.text(W/2, H * 0.43, '  ▶   PLAY  ', {
-        fontFamily:'"Courier New",monospace', fontSize:'22px', fontStyle:'bold',
+      const startPanel = this.add.rectangle(112, 92, 184, 54, 0x000000, 0.45)
+        .setStrokeStyle(2, 0x4dba88, 0.55)
+        .setDepth(19);
+
+      const btn = this.add.text(112, 86, '  PLAY  ', {
+        fontFamily:'"Courier New",monospace', fontSize:'14px', fontStyle:'bold',
         color:'#111111', backgroundColor:'#f0c040',
-        padding:{x:30, y:12},
-      }).setOrigin(0.5).setInteractive({ useHandCursor:true });
+        padding:{x:20, y:7},
+      }).setOrigin(0.5).setDepth(20).setInteractive({ useHandCursor:true });
 
       btn.on('pointerover',  () => btn.setStyle({ backgroundColor:'#ffe066', color:'#000' }));
       btn.on('pointerout',   () => btn.setStyle({ backgroundColor:'#f0c040', color:'#111111' }));
-      btn.on('pointerdown',  () => this._startGame());
-      this.input.keyboard.addKey('ENTER').on('down', () => this._startGame());
-      this.input.keyboard.addKey('SPACE').on('down', () => this._startGame());
+      btn.on('pointerup',  () => this._startGame());
+      this.input.keyboard.addKey('ENTER').on('up', () => this._startGame());
+      this.input.keyboard.addKey('SPACE').on('up', () => this._startGame());
 
       const best = parseInt(localStorage.getItem('zb_best') || '0');
       if (best > 0) {
-        this.add.text(W/2, H * 0.57, `🏆 Best: ${best}`, {
-          fontFamily:'"Courier New",monospace', fontSize:'14px',
+        this.add.text(W - 18, 20, `BEST ${best}`, {
+          fontFamily:'"Courier New",monospace', fontSize:'11px',
           color:'#ffd700', stroke:'#000', strokeThickness:3,
-        }).setOrigin(0.5);
+        }).setOrigin(1, 0).setDepth(20);
       }
 
-      this.add.text(W/2, H * 0.66, 'SPACE / TAP to jump   •   Double-jump allowed', {
-        fontFamily:'"Courier New",monospace', fontSize:'11px', color:'#556677',
-      }).setOrigin(0.5);
+      this.add.text(112, 108, 'tap or space to start', {
+        fontFamily:'"Courier New",monospace', fontSize:'9px', color:'#b9c6ce',
+        stroke:'#000', strokeThickness:3,
+      }).setOrigin(0.5).setDepth(20);
 
-      // Zombie character bobbing on the ground
-      const zb = this.add.image(W * 0.14, GROUND_Y, 'zombie')
+      const zb = this.add.image(38, 250, 'zombie')
         .setOrigin(0.5, ZOMBIE_ORIGIN_Y)
-        .setScale(ZOMBIE_SCALE * 0.9);
-      this.tweens.add({ targets:zb, y:GROUND_Y - 8, duration:800,
-        yoyo:true, repeat:-1, ease:'Sine.easeInOut' });
-
-      // Floating coin
-      const mc = this.add.image(W * 0.14 + 40, GROUND_Y - 55, 'coin').setScale(1.2);
-      this.tweens.add({ targets:mc, y:GROUND_Y - 64, duration:750,
+        .setScale(ZOMBIE_SCALE * 0.94)
+        .setDepth(6);
+      this.tweens.add({ targets:zb, y:244, duration:800,
         yoyo:true, repeat:-1, ease:'Sine.easeInOut' });
 
       // Title pulse
@@ -427,9 +547,13 @@ class MenuScene extends Phaser.Scene {
     }
   }
 
-  async _startGame() {
-    const res = await apiPost('/sessions', { player_name:playerName });
-    if (res) sessionId = res.session_id;
+  _startGame() {
+    if (this.starting) return;
+    this.starting = true;
+    sessionId = null;
+    void apiPost('/sessions', { player_name:playerName }).then((res) => {
+      if (res?.session_id) sessionId = res.session_id;
+    });
     this.scene.start('GameScene');
   }
 }
@@ -452,6 +576,9 @@ class GameScene extends Phaser.Scene {
     this.nextX     = 0;
     this.prevY     = GROUND_Y;
     this.supportPlat = null;
+    this.inputLockedUntil = 0;
+    this.inputReady = false;
+    this.lastLandKey = 'land4';
 
     addBackground(this);
     this.physics.world.gravity.y = GRAVITY;
@@ -461,10 +588,10 @@ class GameScene extends Phaser.Scene {
     // when their position changes, so collision detection is always correct.
     this.platGroup = this.physics.add.group();
 
-    // Starting platform — wide and safe, no gap before it
-    this._spawn(0, GROUND_Y, 460, true);
-    this.nextX = 440;
-    for (let i = 0; i < 9; i++) this._gen();
+    // Starting platform — cliff-like start ledge
+    this._spawn(0, GROUND_Y, 280, true);
+    this.nextX = 254;
+    for (let i = 0; i < 7; i++) this._gen();
 
     this.zombie = this.physics.add.sprite(PLAYER_X, GROUND_Y, 'zombie');
     this.zombie
@@ -487,9 +614,13 @@ class GameScene extends Phaser.Scene {
 
     // Input
     const doJump = () => this._jump();
-    this.input.keyboard.addKey('SPACE').on('down', doJump);
-    this.input.keyboard.addKey('UP').on('down', doJump);
+    this.jumpKeys = [
+      this.input.keyboard.addKey('SPACE'),
+      this.input.keyboard.addKey('UP'),
+    ];
+    this.jumpKeys.forEach((key) => key.on('down', doJump));
     this.input.on('pointerdown', doJump);
+    this.inputLockedUntil = this.time.now + INPUT_GRACE_MS;
 
     // Difficulty ramp
     this.diffTimer = this.time.addEvent({
@@ -516,45 +647,66 @@ class GameScene extends Phaser.Scene {
     });
 
     // HUD
-    const hs = { fontFamily:'"Courier New",monospace', fontSize:'14px',
-      color:'#f0c040', stroke:'#000000', strokeThickness:4 };
-    this.add.rectangle(W/2, 18, W, 36, 0x000000, 0.65).setDepth(10);
+    const hs = { fontFamily:'"Courier New",monospace', fontSize:'11px',
+      color:'#f0c040', stroke:'#000000', strokeThickness:3 };
+    this.add.rectangle(W/2, 15, W, 30, 0x000000, 0.65).setDepth(10);
     // Accent line under HUD bar
-    this.add.rectangle(W/2, 35, W, 2, 0x4dba88, 1).setDepth(10);
+    this.add.rectangle(W/2, 29, W, 2, 0x4dba88, 1).setDepth(10);
 
-    this.scoreTxt = this.add.text(14,  5, 'SCORE  0',  hs).setDepth(11);
-    this.coinTxt  = this.add.text(170, 5, '● 0',
+    this.scoreTxt = this.add.text(12,  4, 'SCORE  0',  hs).setDepth(11);
+    this.coinTxt  = this.add.text(150, 4, '● 0',
       { ...hs, color:'#ffd700' }).setDepth(11);
-    this.bestTxt  = this.add.text(W/2, 5,
+    this.bestTxt  = this.add.text(W/2, 4,
       'BEST  ' + (localStorage.getItem('zb_best') || '0'), hs)
       .setOrigin(0.5, 0).setDepth(11);
-    this.spdTxt   = this.add.text(W - 14, 5, 'SPD 1x',
+    this.spdTxt   = this.add.text(W - 12, 4, 'SPD 1x',
       { ...hs, color:'#7de8c0' }).setOrigin(1, 0).setDepth(11);
 
-    // "GET READY!" flash
-    const readyTxt = this.add.text(W/2, H/2, 'GET READY!', {
-      fontFamily:'"Courier New",monospace', fontSize:'48px', fontStyle:'bold',
-      color:'#7de8c0', stroke:'#000', strokeThickness:8,
-      shadow:{offsetX:3,offsetY:5,color:'#004422',fill:true},
-    }).setOrigin(0.5).setDepth(20).setAlpha(0);
+    // "GET READY!" flash – use pixel-art image if loaded, else fallback text
+    let readyObj;
+    if (this.textures.exists('getReadyImg')) {
+      const s = OVERLAY_WORDMARK_W / 2327;
+      readyObj = this.add.image(W/2, H/2, 'getReadyImg')
+        .setOrigin(0.5).setScale(s).setDepth(20).setAlpha(0);
+    } else {
+      readyObj = this.add.text(W/2, H/2, 'GET READY!', {
+        fontFamily:'"Courier New",monospace', fontSize:'36px', fontStyle:'bold',
+        color:'#7de8c0', stroke:'#000', strokeThickness:8,
+        shadow:{offsetX:3,offsetY:5,color:'#004422',fill:true},
+      }).setOrigin(0.5).setDepth(20).setAlpha(0);
+    }
 
     this.tweens.add({
-      targets: readyTxt,
+      targets: readyObj,
       alpha: { from:0, to:1 }, scaleX:{from:0.6, to:1}, scaleY:{from:0.6, to:1},
       duration: 300, ease:'Back.easeOut',
       onComplete: () => {
         this.time.delayedCall(600, () => {
-          this.tweens.add({ targets:readyTxt, alpha:0, duration:400,
-            onComplete: () => readyTxt.destroy() });
+          this.tweens.add({ targets:readyObj, alpha:0, duration:400,
+            onComplete: () => readyObj.destroy() });
         });
       },
     });
   }
 
+  _chooseFillDepth(topY, isStart, landKey) {
+    if (isStart) return H - topY - 10;
+    if (topY > H * 0.63) return Phaser.Math.Between(88, 154);
+    if (topY > H * 0.48) return Phaser.Math.Between(54, 108);
+    if (landKey) return Phaser.Math.Between(18, 44);
+    return Phaser.Math.Between(0, 24);
+  }
+
   // ─── Spawn one platform ─────────────────────────────────────────────────
-  _spawn(leftX, topY, width, isStart = false) {
-    // Visual: tileSprite clips exactly to width — no overflow into gaps
-    const ts = this.add.tileSprite(leftX, topY, width, PLAT_H, 'platform').setOrigin(0,0);
+  _spawn(leftX, topY, width, isStart = false, landKey = null) {
+    if (!isStart && !landKey && this.textures.exists('land1')) {
+      landKey = (this.lastLandKey === 'land1' && this.textures.exists('land4')) ? 'land4' : 'land1';
+    }
+    if (landKey && LAND_CFGS[landKey]) width = LAND_CFGS[landKey].rw;
+
+    const fillDepth = this._chooseFillDepth(topY, isStart, landKey);
+    const chunk = createChunkVisual(this, { leftX, topY, width, landKey, fillDepth, depth:4 });
+    const ts = chunk.top;
 
     // Physics body: dynamic, immovable, no gravity
     // Body is positioned at the center of the platform
@@ -584,9 +736,10 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    const plat = { leftX, topY, width, ts, go, decor:[], coins:coinArr };
+    const plat = { leftX, topY, width, ts, go, decor:[], coins:coinArr, visuals:chunk.visuals };
     this.platforms.push(plat);
-    if (!isStart && width >= 80) this._addDecor(plat);
+    // Skip procedural decorations for land elements — they have decorations baked in
+    if (!isStart && !landKey && width >= 80) this._addDecor(plat);
     return plat;
   }
 
@@ -607,23 +760,37 @@ class GameScene extends Phaser.Scene {
 
   // ─── Procedural generation ───────────────────────────────────────────────
   _gen() {
-    const earlyGame = this.dist < 2400;
-    const maxGap    = this.speed * AIR_TIME * 0.68;
+    const earlyGame = this.dist < 1800;
+    const maxGap    = this.speed * AIR_TIME * 0.6;
     const gap       = Phaser.Math.Between(
       GAP_MIN,
-      earlyGame ? Math.min(maxGap * 0.45, 140) : Math.min(maxGap, 280)
+      earlyGame ? Math.min(maxGap * 0.38, 110) : Math.min(maxGap, 180)
     );
-    const width = Phaser.Math.Between(
-      earlyGame ? 190 : 110,
-      earlyGame ? 280 : 240
-    );
+
+    // Prefer the supplied land-element art for almost all floating platforms.
+    let width, landKey = null;
+    const landKeys = ['land1', 'land4'].filter(k => this.textures.exists(k));
+    if (landKeys.length) {
+      landKey = landKeys.find((k) => k !== this.lastLandKey) || landKeys[0];
+      if (!earlyGame && landKeys.length > 1 && Math.random() < 0.35) {
+        landKey = Phaser.Utils.Array.GetRandom(landKeys);
+      }
+      this.lastLandKey = landKey;
+      width   = LAND_CFGS[landKey].rw;
+    } else {
+      width = Phaser.Math.Between(
+        earlyGame ? 190 : 110,
+        earlyGame ? 280 : 240
+      );
+    }
+
     const maxClimb = Math.min(110, ((JUMP_VEL*JUMP_VEL)/(2*GRAVITY)) - 40);
     const newY = Phaser.Math.Clamp(
       this.prevY + Phaser.Math.Between(-90, maxClimb),
       H * 0.25, GROUND_Y
     );
     const leftX = this.nextX + gap;
-    this._spawn(leftX, newY, width);
+    this._spawn(leftX, newY, width, false, landKey);
     this.nextX = leftX + width;
     this.prevY = newY;
   }
@@ -631,6 +798,8 @@ class GameScene extends Phaser.Scene {
   // ─── Jump ────────────────────────────────────────────────────────────────
   _jump() {
     if (this.over) return;
+    if (!this.inputReady) return;
+    if (this.time.now < this.inputLockedUntil) return;
     if (this.jumpsUsed < 1 && (this._isGrounded() || this.coyote > 0)) {
       this.zombie.body.setVelocityY(JUMP_VEL);
       this.jumpsUsed++;
@@ -668,17 +837,13 @@ class GameScene extends Phaser.Scene {
     this.coyote = 120;
   }
 
-  _findSupportPlatform() {
+  _isStillSupportedBy(plat) {
+    if (!plat?.body) return false;
     const body = this.zombie.body;
-    if (body.velocity.y < -30) return null;
-
-    for (const plat of this.platforms) {
-      const platBody = plat.go.body;
-      const overlapX = body.right > platBody.left + 6 && body.left < platBody.right - 6;
-      const nearTop = body.bottom >= platBody.top - 4 && body.bottom <= platBody.top + LANDING_TOL;
-      if (overlapX && nearTop) return plat.go;
-    }
-    return null;
+    const platBody = plat.body;
+    const overlapX = body.right > platBody.left + 8 && body.left < platBody.right - 8;
+    const onSameSurface = Math.abs(body.bottom - platBody.top) <= 6;
+    return overlapX && onSameSurface && body.velocity.y >= -30;
   }
 
   // ─── Coin collected ──────────────────────────────────────────────────────
@@ -702,8 +867,16 @@ class GameScene extends Phaser.Scene {
   // ─── Update ──────────────────────────────────────────────────────────────
   update(_, delta) {
     if (this.over) return;
-    const dt  = delta / 1000;
+    const dt  = Math.min(delta, MAX_FRAME_MS) / 1000;
     const now = this.time.now;
+
+    if (!this.inputReady) {
+      const holdingJumpKey = this.jumpKeys?.some((key) => key.isDown);
+      const holdingPointer = this.input.activePointer.isDown;
+      if (now >= this.inputLockedUntil && !holdingJumpKey && !holdingPointer) {
+        this.inputReady = true;
+      }
+    }
 
     if (this.coyote > 0) this.coyote -= delta;
 
@@ -723,8 +896,8 @@ class GameScene extends Phaser.Scene {
       p.go.y              = p.topY  + PLAT_H / 2;
       p.go.body.reset(p.go.x, p.go.y);
 
-      // ── Move visual tileSprite ─────────────────────────────────────────
-      p.ts.x = p.leftX;
+      // ── Move visual chunk ──────────────────────────────────────────────
+      for (const v of p.visuals) v.sprite.x = p.leftX + v.offsetX;
 
       // ── Decor ─────────────────────────────────────────────────────────
       for (const d of p.decor) d.sprite.x = p.leftX + d.rx;
@@ -750,7 +923,7 @@ class GameScene extends Phaser.Scene {
       // Cull off-screen
       if (p.leftX + p.width < -160) {
         p.go.destroy();
-        p.ts.destroy();
+        for (const v of p.visuals) v.sprite.destroy();
         for (const d of p.decor) d.sprite.destroy();
         for (const c of p.coins) if (!c.collected) c.sprite.destroy();
         this.platforms.splice(i, 1);
@@ -761,12 +934,13 @@ class GameScene extends Phaser.Scene {
     // nextX scrolls left with the world; generate whenever the frontier
     // is less than 700px beyond the right edge of the screen.
     this.nextX -= dx;
-    while (this.nextX < W + 700) this._gen();
+    while (this.nextX < W + 360) this._gen();
 
-    this.supportPlat = this._findSupportPlatform();
-    if (this.supportPlat) {
+    if (this.supportPlat && this._isStillSupportedBy(this.supportPlat)) {
       this._snapZombieToSurface(this.supportPlat.body.top);
       this.coyote = 120;
+    } else {
+      this.supportPlat = null;
     }
 
     const grounded = this._isGrounded();
@@ -792,8 +966,12 @@ class GameScene extends Phaser.Scene {
     this.over = true;
     this.diffTimer.remove();
     this.walkTween.stop();
-    if (sessionId)
-      await apiPost(`/sessions/${sessionId}/end`, { score:this.score, distance:Math.floor(this.dist) });
+    if (sessionId) {
+      void apiPost(`/sessions/${sessionId}/end`, {
+        score:this.score,
+        distance:Math.floor(this.dist),
+      });
+    }
     Sfx.die();
     this.cameras.main.shake(300, 0.014);
     this.time.delayedCall(520, () =>
@@ -811,12 +989,19 @@ class GameOverScene extends Phaser.Scene {
     addBackground(this);
     this.add.rectangle(W/2, H/2, W, H, 0x000000, 0.55);
 
-    const go = this.add.text(W/2, H/2 - 92, 'GAME OVER', {
-      fontFamily:'"Courier New",monospace', fontSize:'64px', fontStyle:'bold',
-      color:'#f0a024', stroke:'#ffffff', strokeThickness:8,
-      shadow:{offsetX:5,offsetY:5,color:'#7a3600',fill:true},
-    }).setOrigin(0.5);
-    this.tweens.add({ targets:go, scaleX:{from:0.08,to:1}, scaleY:{from:0.08,to:1}, duration:460, ease:'Back.easeOut' });
+    let go;
+    if (this.textures.exists('gameOverImg')) {
+      const s = OVERLAY_WORDMARK_W / 2104;
+      go = this.add.image(W/2, H/2 - 92, 'gameOverImg').setOrigin(0.5).setScale(s);
+      this.tweens.add({ targets:go, scaleX:{from:s*0.08, to:s}, scaleY:{from:s*0.08, to:s}, duration:460, ease:'Back.easeOut' });
+    } else {
+      go = this.add.text(W/2, H/2 - 92, 'GAME OVER', {
+        fontFamily:'"Courier New",monospace', fontSize:'36px', fontStyle:'bold',
+        color:'#f0a024', stroke:'#ffffff', strokeThickness:8,
+        shadow:{offsetX:5,offsetY:5,color:'#7a3600',fill:true},
+      }).setOrigin(0.5);
+      this.tweens.add({ targets:go, scaleX:{from:0.08,to:1}, scaleY:{from:0.08,to:1}, duration:460, ease:'Back.easeOut' });
+    }
 
     this.add.text(W/2, H/2+4,  `Score: ${this.finalScore}`,
       { fontFamily:'"Courier New",monospace', fontSize:'26px', color:'#f0c040' }).setOrigin(0.5);
@@ -841,37 +1026,44 @@ class GameOverScene extends Phaser.Scene {
       { fontFamily:'"Courier New",monospace', fontSize:'12px', color:'#555' }).setOrigin(0.5);
     this.tweens.add({ targets:hint, alpha:0, duration:720, yoyo:true, repeat:-1 });
 
-    const restart = async () => {
+    let restarting = false;
+    const restart = () => {
+      if (restarting) return;
+      restarting = true;
       sessionId = null;
-      const res = await apiPost('/sessions', { player_name:playerName });
-      if (res) sessionId = res.session_id;
+      void apiPost('/sessions', { player_name:playerName }).then((res) => {
+        if (res?.session_id) sessionId = res.session_id;
+      });
       this.scene.start('GameScene');
     };
-    this.input.keyboard.once('keydown-SPACE', restart);
-    this.input.once('pointerdown', restart);
+    this.input.keyboard.once('keyup-SPACE', restart);
+    this.input.keyboard.once('keyup-ENTER', restart);
+    this.input.once('pointerup', restart);
   }
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 let phaserGame = null;
 
-window.initZombieGame = async function () {
+window.initZombieGame = function () {
   if (phaserGame) { phaserGame.destroy(true); phaserGame = null; }
 
   var d = document.getElementById('diag');
-  if (d) d.textContent = 'asset:prep';
-  try {
-    preparedAssets = await prepareGameAssets();
-    if (d) d.textContent = 'asset:ok';
-  } catch (e) {
-    if (d) d.textContent = 'asset-err:' + (e.message || String(e)).slice(0, 60);
-    throw e;
-  }
+  if (d) d.textContent = 'init:start';
+  // BootScene loads the embedded data-URI assets directly, which avoids
+  // the file:// startup stall seen with the manual image-prepare path.
 
   phaserGame = new Phaser.Game({
     type:   Phaser.AUTO,
     parent: 'game-container',
     backgroundColor: '#03040b',
+    pixelArt: true,
+    render: {
+      antialias: false,
+      pixelArt: true,
+      roundPixels: true,
+      powerPreference: 'high-performance',
+    },
     scale: {
       mode:       Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,

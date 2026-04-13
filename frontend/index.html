@@ -33,6 +33,7 @@
     canvas {
       display: block;
       outline: none;
+      image-rendering: pixelated;
     }
 
     /* ── Portrait-mode nudge (phones held upright) ─────────────────────── */
@@ -84,7 +85,7 @@
   </div>
 
   <div id="game-container"></div>
-  <div id="diag" style="position:fixed;bottom:4px;right:6px;color:#6f6;font:11px monospace;z-index:9999;pointer-events:none;background:rgba(0,0,0,.5);padding:2px 4px;">JS ok</div>
+  <div id="diag" style="display:none;position:fixed;bottom:4px;right:6px;color:#6f6;font:11px monospace;z-index:9999;pointer-events:none;background:rgba(0,0,0,.5);padding:2px 4px;">JS ok</div>
 
   <script>
     window.onerror = function(msg, src, line, col, err) {
@@ -96,17 +97,19 @@
       window.onerror(e.reason, 'promise', 0, 0, e.reason);
     });
   </script>
-  <script src="js/game-assets.js?v=20260412d"></script>
-  <script src="js/game.js?v=20260412d"></script>
+  <script src="js/game.js?v=20260413j"></script>
   <script>
-    document.getElementById('diag').textContent = 'scripts ok';
+    var DEBUG_UI = /[?&]debug=1\b/.test(window.location.search);
+    var diag = document.getElementById('diag');
+    if (DEBUG_UI) diag.style.display = 'block';
+    diag.textContent = 'scripts ok';
     window.addEventListener('load', function() {
       var d = document.getElementById('diag');
       var gc = document.getElementById('game-container');
 
       // Show container size BEFORE Phaser reads it
       var r = gc.getBoundingClientRect();
-      d.textContent = 'container ' + Math.round(r.width) + 'x' + Math.round(r.height);
+      if (DEBUG_UI) d.textContent = 'container ' + Math.round(r.width) + 'x' + Math.round(r.height);
 
       // If height is 0, CSS percentage chain failed — force it
       if (r.height < 10) {
@@ -115,16 +118,17 @@
         gc.style.left = '0';
         gc.style.width = '100%';
         gc.style.height = '100%';
-        d.textContent = 'FIXED ' + window.innerWidth + 'x' + window.innerHeight;
+        if (DEBUG_UI) d.textContent = 'FIXED ' + window.innerWidth + 'x' + window.innerHeight;
       }
 
       Promise.resolve(initZombieGame()).catch(function(err) {
-        d.textContent = 'init-err:' + ((err && err.message) || String(err)).slice(0, 80);
+        if (DEBUG_UI) d.textContent = 'init-err:' + ((err && err.message) || String(err)).slice(0, 80);
       });
 
       // Check canvas 2 seconds after Phaser starts (appends, preserves scene diag)
       setTimeout(function() {
         var c = gc.querySelector('canvas');
+        if (!DEBUG_UI) return;
         if (!c) { d.textContent += ' | NO CANVAS'; return; }
         d.textContent += ' | cvs:' + c.width + 'x' + c.height;
       }, 2000);
