@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head><style>
+  body{background:#000;color:#0f0;font-family:monospace;padding:20px;}
+  #c{border:2px solid #0f0;display:block;margin:10px 0;}
+</style></head>
+<body>
+<pre id="log">Running tests...\n</pre>
+<canvas id="c" width="400" height="120"></canvas>
+<script src="js/game-assets.js"></script>
+<script>
+const L = document.getElementById('log');
+const add = s => { L.textContent += s + '\n'; };
+
+add('ASSET_BG defined: ' + (typeof ASSET_BG !== 'undefined'));
+add('ASSET_ZOMBIE defined: ' + (typeof ASSET_ZOMBIE !== 'undefined'));
+
+if (typeof ASSET_BG !== 'undefined') {
+  add('ASSET_BG starts with: ' + ASSET_BG.substring(0,30));
+  const img = new Image();
+  img.onload = () => {
+    add('Background image loaded: ' + img.naturalWidth + 'x' + img.naturalHeight);
+    const ctx = document.getElementById('c').getContext('2d');
+    ctx.drawImage(img, 0, 0, 200, 120);
+    add('Background drawn to canvas OK');
+  };
+  img.onerror = e => add('Background load ERROR');
+  img.src = ASSET_BG;
+}
+
+if (typeof ASSET_ZOMBIE !== 'undefined') {
+  const img2 = new Image();
+  img2.onload = () => {
+    add('Zombie image loaded: ' + img2.naturalWidth + 'x' + img2.naturalHeight);
+    const ctx = document.getElementById('c').getContext('2d');
+    ctx.drawImage(img2, 200, 0, 100, 120);
+    add('Zombie drawn to canvas OK');
+  };
+  img2.onerror = e => add('Zombie load ERROR');
+  img2.src = ASSET_ZOMBIE;
+}
+</script>
+</body>
+</html>

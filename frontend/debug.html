@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html><head>
+<style>body{margin:0;background:#111;color:#0f0;font:14px monospace;}
+#log{padding:10px;position:fixed;top:0;left:0;right:0;z-index:99;background:rgba(0,0,0,0.8);}
+</style>
+</head><body>
+<div id="log">Loading...</div>
+<div id="game-container"></div>
+<script>
+var L = document.getElementById('log');
+function log(msg) { L.innerHTML += '<br>' + msg; console.log(msg); }
+
+window.onerror = function(msg,src,line,col,err) {
+  L.style.background='#800';
+  log('ERROR: ' + msg + ' @ ' + src + ':' + line);
+  return false;
+};
+
+log('Step 1: Loading Phaser...');
+</script>
+<script src="js/phaser.min.js" onload="log('Phaser loaded: v' + Phaser.VERSION)" onerror="log('PHASER LOAD FAILED')"></script>
+<script src="js/game-assets.js" onload="log('game-assets loaded. ASSET_BG=' + (typeof ASSET_BG) + ' ASSET_ZOMBIE=' + (typeof ASSET_ZOMBIE))" onerror="log('game-assets LOAD FAILED')"></script>
+<script>
+log('Step 2: Starting minimal Phaser game...');
+var game = new Phaser.Game({
+  type: Phaser.AUTO,
+  parent: 'game-container',
+  width: 400, height: 200,
+  backgroundColor: '#1a3a1a',
+  scene: {
+    preload: function() {
+      log('preload()');
+      if (typeof ASSET_BG !== 'undefined') {
+        this.load.image('bg', ASSET_BG);
+        log('loading bg from data URL...');
+      }
+      if (typeof ASSET_ZOMBIE !== 'undefined') {
+        this.load.image('zombie', ASSET_ZOMBIE);
+        log('loading zombie from data URL...');
+      }
+    },
+    create: function() {
+      log('create() - Phaser is working!');
+      this.add.text(10, 10, 'Phaser OK', {color:'#0f0',fontSize:'18px'});
+      if (this.textures.exists('bg')) {
+        log('bg texture loaded OK');
+        this.add.image(200,100,'bg').setDisplaySize(400,200);
+      }
+      if (this.textures.exists('zombie')) {
+        var t = this.textures.get('zombie');
+        log('zombie texture loaded OK: ' + t.source[0].width + 'x' + t.source[0].height);
+        this.add.image(350,150,'zombie').setScale(0.15);
+      }
+    }
+  }
+});
+</script>
+</body></html>

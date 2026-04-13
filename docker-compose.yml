@@ -1,0 +1,72 @@
+version: '3.9'
+
+services:
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Flask API ──────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - '5000:5000'
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////data/zombie_game.db
+      SECRET_KEY: zombie-hop-secret-change-me
+    volumes:
+      - db_data:/data
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python app.py
+
+  # ── Celery Worker ──────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////data/zombie_game.db
+    volumes:
+      - db_data:/data
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A tasks.celery_app worker --loglevel=info --concurrency=2
+
+  # ── Celery Beat (scheduler) ────────────────────────────────────────────────
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////data/zombie_game.db
+    volumes:
+      - db_data:/data
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A tasks.celery_app beat --loglevel=info
+
+volumes:
+  redis_data:
+  db_data:
