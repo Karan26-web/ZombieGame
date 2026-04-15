@@ -20,6 +20,9 @@ const W = 860, H = 420;
 const GRAVITY  = 1500;
 const JUMP_VEL = -760;
 const AIR_TIME = (2 * 760) / 1500;  // ≈ 1.013 s
+const JUMP_ENABLED = true;
+const CONTINUOUS_GROUND = false;
+const FLAT_PLATFORM_PATH = true;
 
 // ─── SPEED / DIFFICULTY ──────────────────────────────────────────────────────
 const INIT_SPD = 190;
@@ -54,10 +57,11 @@ Object.values(LAND_CFGS).forEach(c => {
 
 // ─── COINS ───────────────────────────────────────────────────────────────────
 const COIN_VAL    = 10;
-const COIN_HOVER  = 32;   // px above platform top
-const COIN_BOB    = 4;
+const COIN_HOVER  = 10;   // keep coins in the running path
+const COIN_BOB    = 0;
 const COIN_SPEED  = 0.003;
 const COIN_R2     = 18 * 18; // squared collection radius
+const COIN_PATH_INSET = 34;
 
 // ─── PALETTE ─────────────────────────────────────────────────────────────────
 const C = {
@@ -191,18 +195,24 @@ async function loadImageWithFallback(name, sources) {
   throw new Error(`Failed to load ${name}${lastErr ? ` (${lastErr.message})` : ''}`);
 }
 
+function resolveAssetPath(filename) {
+  const relativePath = `../assets/${filename}`;
+  if (typeof window === 'undefined' || !window.location?.href) return relativePath;
+  return new URL(relativePath, window.location.href).toString();
+}
+
 function getAssetSources() {
-  // If embedded data URIs are present, try them first. Otherwise fall back
-  // to the real PNG files in frontend/assets.
+  // If embedded data URIs are present, try them first. Otherwise resolve the
+  // repo-level assets folder relative to the current entry point.
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const uri = (name) => (typeof globals[name] !== 'undefined' ? globals[name] : null);
   return {
-    bg:          [uri('ASSET_BG'),       'assets/background.png'  ].filter(Boolean),
-    zombie:      [uri('ASSET_ZOMBIE'),   'assets/Zombie.png'      ].filter(Boolean),
-    land1:       [uri('ASSET_LAND1'),    'assets/landElement1.png'].filter(Boolean),
-    land4:       [uri('ASSET_LAND4'),    'assets/landElement4.png'].filter(Boolean),
-    getReadyImg: [uri('ASSET_GETREADY'), 'assets/getReadyText.png'].filter(Boolean),
-    gameOverImg: [uri('ASSET_GAMEOVER'), 'assets/gameOverText.png'].filter(Boolean),
+    bg:          [uri('ASSET_BG'),       resolveAssetPath('background.png')  ].filter(Boolean),
+    zombie:      [uri('ASSET_ZOMBIE'),   resolveAssetPath('Zombie.png')      ].filter(Boolean),
+    land1:       [uri('ASSET_LAND1'),    resolveAssetPath('landElement1.png')].filter(Boolean),
+    land4:       [uri('ASSET_LAND4'),    resolveAssetPath('landElement4.png')].filter(Boolean),
+    getReadyImg: [uri('ASSET_GETREADY'), resolveAssetPath('getReadyText.png')].filter(Boolean),
+    gameOverImg: [uri('ASSET_GAMEOVER'), resolveAssetPath('gameOverText.png')].filter(Boolean),
   };
 }
 
@@ -408,6 +418,9 @@ const ZOMBIE_BODY_H = 68;
 const ZOMBIE_BODY_OFF_X = Math.round((ZOMBIE_W * ZOMBIE_SCALE - ZOMBIE_BODY_W) / 2);
 const ZOMBIE_BODY_OFF_Y = Math.round((ZOMBIE_H * ZOMBIE_SCALE * ZOMBIE_ORIGIN_Y) - ZOMBIE_BODY_H);
 const LANDING_TOL = 18;
+const LANDING_MIN_VEL = 45;
+const SUPPORT_EDGE_MARGIN = 14;
+const EDGE_DROP_VEL = 140;
 
 // ─── BOOT SCENE ──────────────────────────────────────────────────────────────
 class BootScene extends Phaser.Scene {
@@ -520,17 +533,10 @@ class MenuScene extends Phaser.Scene {
         }).setOrigin(1, 0).setDepth(20);
       }
 
-      this.add.text(112, 108, 'tap or space to start', {
-        fontFamily:'"Courier New",monospace', fontSize:'9px', color:'#b9c6ce',
-        stroke:'#000', strokeThickness:3,
-      }).setOrigin(0.5).setDepth(20);
-
       const zb = this.add.image(38, 250, 'zombie')
         .setOrigin(0.5, ZOMBIE_ORIGIN_Y)
         .setScale(ZOMBIE_SCALE * 0.94)
         .setDepth(6);
-      this.tweens.add({ targets:zb, y:244, duration:800,
-        yoyo:true, repeat:-1, ease:'Sine.easeInOut' });
 
       // Title pulse
       this.tweens.add({ targets:title, alpha:0.75, duration:1200,
@@ -589,8 +595,8 @@ class GameScene extends Phaser.Scene {
     this.platGroup = this.physics.add.group();
 
     // Starting platform — cliff-like start ledge
-    this._spawn(0, GROUND_Y, 280, true);
-    this.nextX = 254;
+    const startPlat = this._spawn(0, GROUND_Y, 280, true);
+    this.nextX = startPlat.leftX + startPlat.width;
     for (let i = 0; i < 7; i++) this._gen();
 
     this.zombie = this.physics.add.sprite(PLAYER_X, GROUND_Y, 'zombie');
@@ -601,6 +607,9 @@ class GameScene extends Phaser.Scene {
     this.zombie.body
       .setSize(ZOMBIE_BODY_W, ZOMBIE_BODY_H, false)
       .setOffset(ZOMBIE_BODY_OFF_X, ZOMBIE_BODY_OFF_Y);
+    this.supportPlat = startPlat.go;
+    this._snapZombieToSurface(startPlat.go.body.top);
+    this.zombie.body.setAllowGravity(false);
 
     // ── Collider: only resolve when zombie is moving downward (landing) ───
     // This prevents side-on hits from platforms scrolling under the zombie
@@ -613,13 +622,17 @@ class GameScene extends Phaser.Scene {
     );
 
     // Input
-    const doJump = () => this._jump();
-    this.jumpKeys = [
-      this.input.keyboard.addKey('SPACE'),
-      this.input.keyboard.addKey('UP'),
-    ];
-    this.jumpKeys.forEach((key) => key.on('down', doJump));
-    this.input.on('pointerdown', doJump);
+    if (JUMP_ENABLED) {
+      const doJump = () => this._jump();
+      this.jumpKeys = [
+        this.input.keyboard.addKey('SPACE'),
+        this.input.keyboard.addKey('UP'),
+      ];
+      this.jumpKeys.forEach((key) => key.on('down', doJump));
+      this.input.on('pointerdown', doJump);
+    } else {
+      this.jumpKeys = [];
+    }
     this.inputLockedUntil = this.time.now + INPUT_GRACE_MS;
 
     // Difficulty ramp
@@ -656,31 +669,6 @@ class GameScene extends Phaser.Scene {
     this.spdTxt   = this.add.text(W - 12, 4, 'SPD 1x',
       { ...hs, color:'#7de8c0' }).setOrigin(1, 0).setDepth(11);
 
-    // "GET READY!" flash – use pixel-art image if loaded, else fallback text
-    let readyObj;
-    if (this.textures.exists('getReadyImg')) {
-      const s = OVERLAY_WORDMARK_W / 2327;
-      readyObj = this.add.image(W/2, H/2, 'getReadyImg')
-        .setOrigin(0.5).setScale(s).setDepth(20).setAlpha(0);
-    } else {
-      readyObj = this.add.text(W/2, H/2, 'GET READY!', {
-        fontFamily:'"Courier New",monospace', fontSize:'36px', fontStyle:'bold',
-        color:'#7de8c0', stroke:'#000', strokeThickness:8,
-        shadow:{offsetX:3,offsetY:5,color:'#004422',fill:true},
-      }).setOrigin(0.5).setDepth(20).setAlpha(0);
-    }
-
-    this.tweens.add({
-      targets: readyObj,
-      alpha: { from:0, to:1 }, scaleX:{from:0.6, to:1}, scaleY:{from:0.6, to:1},
-      duration: 300, ease:'Back.easeOut',
-      onComplete: () => {
-        this.time.delayedCall(600, () => {
-          this.tweens.add({ targets:readyObj, alpha:0, duration:400,
-            onComplete: () => readyObj.destroy() });
-        });
-      },
-    });
   }
 
   _chooseFillDepth(topY, isStart, landKey) {
@@ -689,6 +677,25 @@ class GameScene extends Phaser.Scene {
     if (topY > H * 0.48) return Phaser.Math.Between(54, 108);
     if (landKey) return Phaser.Math.Between(18, 44);
     return Phaser.Math.Between(0, 24);
+  }
+
+  _buildPathCoins(leftX, topY, width, isStart) {
+    const coinArr = [];
+    if (isStart || width < 100) return coinArr;
+
+    const count = Phaser.Math.Clamp(Math.round(width / 72), 2, 5);
+    const startX = Math.min(COIN_PATH_INSET, width / 2);
+    const endX = Math.max(width - COIN_PATH_INSET, width / 2);
+
+    for (let i = 0; i < count; i++) {
+      const t = count === 1 ? 0.5 : i / (count - 1);
+      const rx = Math.round(Phaser.Math.Linear(startX, endX, t));
+      const baseY = topY - COIN_HOVER;
+      const sprite = this.add.image(leftX + rx, baseY, 'coin').setDepth(5);
+      coinArr.push({ sprite, rx, baseY, phase: 0, collected: false });
+    }
+
+    return coinArr;
   }
 
   // ─── Spawn one platform ─────────────────────────────────────────────────
@@ -715,20 +722,7 @@ class GameScene extends Phaser.Scene {
     // body.top  = go.y - PLAT_H/2 = topY  ✓
     go.body.setSize(width, PLAT_H, true);
 
-    // Coins floating above this platform
-    const coinArr = [];
-    if (!isStart && width >= 100) {
-      const count = Phaser.Math.Between(1, Math.min(3, Math.ceil(width / 85)));
-      const usedSlots = new Set();
-      for (let i = 0; i < count; i++) {
-        let rx, tries = 0;
-        do { rx = Phaser.Math.Between(24, width - 24); tries++; }
-        while (usedSlots.has(Math.floor(rx / 32)) && tries < 10);
-        usedSlots.add(Math.floor(rx / 32));
-        const sprite = this.add.image(leftX + rx, topY - COIN_HOVER, 'coin').setDepth(5);
-        coinArr.push({ sprite, rx, baseY: topY - COIN_HOVER, phase: Math.random() * Math.PI * 2, collected: false });
-      }
-    }
+    const coinArr = this._buildPathCoins(leftX, topY, width, isStart);
 
     const plat = { leftX, topY, width, ts, go, decor:[], coins:coinArr, visuals:chunk.visuals };
     this.platforms.push(plat);
@@ -756,10 +750,12 @@ class GameScene extends Phaser.Scene {
   _gen() {
     const earlyGame = this.dist < 1800;
     const maxGap    = this.speed * AIR_TIME * 0.6;
-    const gap       = Phaser.Math.Between(
-      GAP_MIN,
-      earlyGame ? Math.min(maxGap * 0.38, 110) : Math.min(maxGap, 180)
-    );
+    const gap       = CONTINUOUS_GROUND
+      ? 0
+      : Phaser.Math.Between(
+          GAP_MIN,
+          earlyGame ? Math.min(maxGap * 0.38, 110) : Math.min(maxGap, 180)
+        );
 
     // Prefer the supplied land-element art for almost all floating platforms.
     let width, landKey = null;
@@ -779,10 +775,12 @@ class GameScene extends Phaser.Scene {
     }
 
     const maxClimb = Math.min(110, ((JUMP_VEL*JUMP_VEL)/(2*GRAVITY)) - 40);
-    const newY = Phaser.Math.Clamp(
-      this.prevY + Phaser.Math.Between(-90, maxClimb),
-      H * 0.25, GROUND_Y
-    );
+    const newY = FLAT_PLATFORM_PATH
+      ? GROUND_Y
+      : Phaser.Math.Clamp(
+          this.prevY + Phaser.Math.Between(-90, maxClimb),
+          H * 0.25, GROUND_Y
+        );
     const leftX = this.nextX + gap;
     this._spawn(leftX, newY, width, false, landKey);
     this.nextX = leftX + width;
@@ -791,16 +789,15 @@ class GameScene extends Phaser.Scene {
 
   // ─── Jump ────────────────────────────────────────────────────────────────
   _jump() {
-    if (this.over) return;
+    if (this.over || !JUMP_ENABLED) return;
     if (!this.inputReady) return;
     if (this.time.now < this.inputLockedUntil) return;
     if (this.jumpsUsed < 1 && (this._isGrounded() || this.coyote > 0)) {
+      this._clearSupportedPlatform(true);
       this.zombie.body.setVelocityY(JUMP_VEL);
       this.jumpsUsed++;
       this.coyote = 0;
-      this.supportPlat = null;
       Sfx.jump();
-      this.tweens.add({ targets:this.zombie, scaleY:ZOMBIE_SCALE*1.18, scaleX:ZOMBIE_SCALE*0.86, duration:80, yoyo:true, ease:'Back.easeOut' });
     }
   }
 
@@ -815,16 +812,34 @@ class GameScene extends Phaser.Scene {
     const prevBottom = body.prev.y + body.height;
     const overlapX = body.right > platBody.left + 6 && body.left < platBody.right - 6;
     const comingFromAbove = prevBottom <= platBody.top + LANDING_TOL;
-    return overlapX && comingFromAbove && body.velocity.y >= -30;
+    return overlapX && comingFromAbove && body.velocity.y >= LANDING_MIN_VEL;
   }
 
   _snapZombieToSurface(surfaceY) {
-    this.zombie.body.reset(this.zombie.x, surfaceY);
+    this.zombie.setY(surfaceY);
+    this.zombie.body.updateFromGameObject();
+    this.zombie.body.prev.y = this.zombie.body.y;
+  }
+
+  _setSupportedPlatform(plat) {
+    if (!plat?.body) return;
+    this.supportPlat = plat;
+    this._snapZombieToSurface(plat.body.top);
+    this.zombie.body.setAllowGravity(false);
+    this.zombie.body.setVelocityY(0);
+  }
+
+  _clearSupportedPlatform(keepVelocity = false) {
+    const hadSupport = this.supportPlat !== null;
+    this.supportPlat = null;
+    this.zombie.body.setAllowGravity(true);
+    if (!keepVelocity && hadSupport && this.zombie.body.velocity.y < EDGE_DROP_VEL) {
+      this.zombie.body.setVelocityY(EDGE_DROP_VEL);
+    }
   }
 
   _onLand(plat) {
-    this.supportPlat = plat;
-    this._snapZombieToSurface(plat.body.top);
+    this._setSupportedPlatform(plat);
     if (this.jumpsUsed > 0) Sfx.land();
     this.jumpsUsed = 0;
     this.coyote = 120;
@@ -834,9 +849,12 @@ class GameScene extends Phaser.Scene {
     if (!plat?.body) return false;
     const body = this.zombie.body;
     const platBody = plat.body;
-    const overlapX = body.right > platBody.left + 8 && body.left < platBody.right - 8;
-    const onSameSurface = Math.abs(body.bottom - platBody.top) <= 6;
-    return overlapX && onSameSurface && body.velocity.y >= -30;
+    const edgeMargin = Math.min(SUPPORT_EDGE_MARGIN, platBody.width * 0.25);
+    const centerX = body.center.x;
+    const overlapX = centerX >= platBody.left + edgeMargin && centerX <= platBody.right - edgeMargin;
+    const footY = this.zombie.y;
+    const onSameSurface = footY >= platBody.top - 4 && footY <= platBody.top + 8;
+    return overlapX && onSameSurface && body.velocity.y > -LANDING_MIN_VEL;
   }
 
   // ─── Coin collected ──────────────────────────────────────────────────────
@@ -862,6 +880,9 @@ class GameScene extends Phaser.Scene {
     if (this.over) return;
     const dt  = Math.min(delta, MAX_FRAME_MS) / 1000;
     const now = this.time.now;
+
+    this.zombie.setScale(ZOMBIE_SCALE);
+    this.zombie.setAngle(0);
 
     if (!this.inputReady) {
       const holdingJumpKey = this.jumpKeys?.some((key) => key.isDown);
@@ -900,7 +921,7 @@ class GameScene extends Phaser.Scene {
         if (coin.collected) continue;
         coin.baseY -= dx;   // scroll with platform
         const cx = p.leftX + coin.rx;
-        const cy = coin.baseY + Math.sin(now * COIN_SPEED + coin.phase) * COIN_BOB;
+        const cy = coin.baseY + (COIN_BOB ? Math.sin(now * COIN_SPEED + coin.phase) * COIN_BOB : 0);
         coin.sprite.x = cx;
         coin.sprite.y = cy;
 
@@ -930,10 +951,10 @@ class GameScene extends Phaser.Scene {
     while (this.nextX < W + 360) this._gen();
 
     if (this.supportPlat && this._isStillSupportedBy(this.supportPlat)) {
-      this._snapZombieToSurface(this.supportPlat.body.top);
+      this._setSupportedPlatform(this.supportPlat);
       this.coyote = 120;
     } else {
-      this.supportPlat = null;
+      this._clearSupportedPlatform();
     }
 
     // ── Score ─────────────────────────────────────────────────────────────

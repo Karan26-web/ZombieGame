@@ -22,7 +22,12 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from sqlalchemy import func
 
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), '..', 'frontend')
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+FRONTEND_DIR = os.path.join(ROOT_DIR, 'frontend')
+ASSET_DIRS = [
+    os.path.join(ROOT_DIR, 'assets'),
+    os.path.join(FRONTEND_DIR, 'assets'),
+]
 
 import redis_client as rc
 from config import DATABASE_URL, SECRET_KEY
@@ -242,7 +247,12 @@ def serve_index():
 
 @app.route('/assets/<path:filename>')
 def serve_assets(filename):
-    return send_from_directory(os.path.join(FRONTEND_DIR, 'assets'), filename)
+    # Prefer the repo-level assets folder; keep the old frontend/assets
+    # location as a fallback so older file layouts still boot.
+    for asset_dir in ASSET_DIRS:
+        if os.path.isfile(os.path.join(asset_dir, filename)):
+            return send_from_directory(asset_dir, filename)
+    return json_error(f'Asset not found: {filename}', 404)
 
 @app.route('/js/<path:filename>')
 def serve_js(filename):
