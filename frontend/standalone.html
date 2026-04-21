@@ -69,6 +69,7 @@ const DIRT_H   = 44;
 const PLAT_H   = CAP_H + DIRT_H;        // 58 px total
 const GAP_MIN  = 80;
 const GROUND_Y = Math.round(H * 0.73);  // ≈ 307
+const INPUT_GRACE_MS = 260;
 
 // ─── COINS ───────────────────────────────────────────────────────────────────
 const COIN_VAL    = 10;
@@ -286,7 +287,7 @@ const ZOMBIE_BODY_W = 36;
 const ZOMBIE_BODY_H = 68;
 const ZOMBIE_BODY_OFF_X = Math.round((ZOMBIE_W * ZOMBIE_SCALE - ZOMBIE_BODY_W) / 2);
 const ZOMBIE_BODY_OFF_Y = Math.round((ZOMBIE_H * ZOMBIE_SCALE * ZOMBIE_ORIGIN_Y) - ZOMBIE_BODY_H);
-const LANDING_TOL = 18;
+const LANDING_TOL = 8;
 const LANDING_MIN_VEL = 45;
 const TRACE_UI = /[?&]trace=1\b/.test(window.location.search);
 
@@ -389,6 +390,11 @@ class GameScene extends Phaser.Scene {
     this.nextX     = 0;
     this.prevY     = GROUND_Y;
     this.supportPlat = null;
+    this.inputLockedUntil = 0;
+    this.inputReady = false;
+    this.jumpKeys = [];
+    this.prevJumpKeyDown = [];
+    this.prevPointerDown = false;
     this.traceMinY = Infinity;
     this.traceMaxY = -Infinity;
     this.traceLandCount = 0;
@@ -433,11 +439,14 @@ class GameScene extends Phaser.Scene {
 
     // Input
     if (JUMP_ENABLED) {
-      const doJump = () => this._jump();
-      this.input.keyboard.addKey('SPACE').on('down', doJump);
-      this.input.keyboard.addKey('UP').on('down', doJump);
-      this.input.on('pointerdown', doJump);
+      this.jumpKeys = [
+        this.input.keyboard.addKey('SPACE'),
+        this.input.keyboard.addKey('UP'),
+      ];
     }
+    this.prevJumpKeyDown = this.jumpKeys.map((key) => key.isDown);
+    this.prevPointerDown = this.input.activePointer.isDown;
+    this.inputLockedUntil = this.time.now + INPUT_GRACE_MS;
 
     // Difficulty ramp
     this.diffTimer = this.time.addEvent({
@@ -490,18 +499,14 @@ class GameScene extends Phaser.Scene {
     // Visual: tileSprite clips exactly to width — no overflow into gaps
     const ts = this.add.tileSprite(leftX, topY, width, PLAT_H, 'platform').setOrigin(0,0);
 
-    // Physics body: dynamic, immovable, no gravity
-    // Body is positioned at the center of the platform
-    const cx = leftX + width / 2;
-    const cy = topY  + PLAT_H / 2;
-    const go = this.platGroup.create(cx, cy, null);
+    // Physics body: dynamic, immovable, no gravity.
+    // Arcade body.reset(x, y) uses top-left coordinates.
+    const go = this.platGroup.create(leftX, topY, null);
     go.setVisible(false);
     go.body.allowGravity = false;
     go.body.immovable    = true;
-    // setSize with offset=0,0 centers the body on the game object (origin 0.5)
-    // body.left = go.x - width/2 = leftX  ✓
-    // body.top  = go.y - PLAT_H/2 = topY  ✓
-    go.body.setSize(width, PLAT_H, true);
+    go.body.setSize(width, PLAT_H, false);
+    go.body.reset(leftX, topY);
 
     const coinArr = this._buildPathCoins(leftX, topY, width, isStart);
 
@@ -530,12 +535,14 @@ class GameScene extends Phaser.Scene {
   _gen() {
     const earlyGame = this.dist < 2400;
     const maxGap    = this.speed * AIR_TIME * 0.68;
+    const maxEarlyGap = Math.max(GAP_MIN + 8, Math.min(maxGap * 0.78, 140));
+    const maxLateGap = Math.max(GAP_MIN + 20, Math.min(maxGap * 0.95, 280));
     const gap       = CONTINUOUS_GROUND
       ? 0
       : Phaser.Math.Between(
-          GAP_MIN,
-          earlyGame ? Math.min(maxGap * 0.45, 140) : Math.min(maxGap, 280)
-        );
+        GAP_MIN,
+        earlyGame ? maxEarlyGap : maxLateGap
+      );
     const width = Phaser.Math.Between(
       earlyGame ? 190 : 110,
       earlyGame ? 280 : 240
@@ -556,6 +563,8 @@ class GameScene extends Phaser.Scene {
   // ─── Jump ────────────────────────────────────────────────────────────────
   _jump() {
     if (this.over || !JUMP_ENABLED) return;
+    if (!this.inputReady) return;
+    if (this.time.now < this.inputLockedUntil) return;
     if (this.jumpsUsed < 1 && (this._isGrounded() || this.coyote > 0)) {
       this._clearSupportedPlatform();
       this.zombie.body.setVelocityY(JUMP_VEL);
@@ -598,6 +607,9 @@ class GameScene extends Phaser.Scene {
     if (this.supportPlat) this.traceClearCount++;
     this.supportPlat = null;
     this.zombie.body.setAllowGravity(true);
+    if (this.zombie.body.velocity.y < 380) {
+      this.zombie.body.setVelocityY(380);
+    }
   }
 
   _onLand(plat) {
@@ -612,7 +624,7 @@ class GameScene extends Phaser.Scene {
     if (!plat?.body) return false;
     const body = this.zombie.body;
     const platBody = plat.body;
-    const overlapX = body.right > platBody.left + 8 && body.left < platBody.right - 8;
+    const overlapX = body.right > platBody.left + 22 && body.left < platBody.right - 22;
     const footY = this.zombie.y;
     const onSameSurface = footY >= platBody.top - 4 && footY <= platBody.top + 8;
     return overlapX && onSameSurface && body.velocity.y > -LANDING_MIN_VEL;
@@ -642,6 +654,25 @@ class GameScene extends Phaser.Scene {
     const dt  = delta / 1000;
     const now = this.time.now;
 
+    const keyDownStates = this.jumpKeys.map((key) => key.isDown);
+    const holdingJumpKey = keyDownStates.some(Boolean);
+    const jumpKeyPressed = keyDownStates.some((isDown, idx) => isDown && !this.prevJumpKeyDown[idx]);
+    this.prevJumpKeyDown = keyDownStates;
+
+    const holdingPointer = this.input.activePointer.isDown;
+    const pointerPressed = holdingPointer && !this.prevPointerDown;
+    this.prevPointerDown = holdingPointer;
+
+    if (!this.inputReady) {
+      if (now >= this.inputLockedUntil && !holdingJumpKey && !holdingPointer) {
+        this.inputReady = true;
+      }
+    }
+
+    if (this.inputReady && now >= this.inputLockedUntil && (jumpKeyPressed || pointerPressed)) {
+      this._jump();
+    }
+
     if (TRACE_UI) {
       this.traceMinY = Math.min(this.traceMinY, this.zombie.y);
       this.traceMaxY = Math.max(this.traceMaxY, this.zombie.y);
@@ -657,13 +688,10 @@ class GameScene extends Phaser.Scene {
       p.leftX -= dx;
 
       // ── Move dynamic physics body ──────────────────────────────────────
-      // Set body position directly each frame; velocity stays 0 so the
-      // physics step doesn't move it again.  Dynamic bodies update their
-      // internal spatial tree automatically, so collision detection is
-      // always accurate regardless of how we move the body.
-      p.go.x              = p.leftX + p.width / 2;
-      p.go.y              = p.topY  + PLAT_H / 2;
-      p.go.body.reset(p.go.x, p.go.y);
+      // body.reset(x, y) expects top-left coordinates.
+      p.go.x = p.leftX;
+      p.go.y = p.topY;
+      p.go.body.reset(p.leftX, p.topY);
 
       // ── Move visual tileSprite ─────────────────────────────────────────
       p.ts.x = p.leftX;
