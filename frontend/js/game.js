@@ -22,7 +22,7 @@ const FLAT_PLATFORM_PATH = true;
 const INIT_SPD = 190;
 const MAX_SPD = 420;
 const SPD_STEP = 12;
-const DIFF_MS = 6500;
+const DIFF_MS = 8000;
 
 // ─── LEVELS ──────────────────────────────────────────────────────────────────
 const LEVELS = [
@@ -62,10 +62,9 @@ Object.values(LAND_CFGS).forEach(c => {
 
 // ─── FLESH CHUNKS ────────────────────────────────────────────────────────────
 const FLESH_VAL = 10;
-const FLESH_HOVER = 14;   // float above platform surface
+const FLESH_HOVER = 30;   // float above platform surface
 const FLESH_BOB = 0;
 const FLESH_SPEED = 0.003;
-const FLESH_R2 = 20 * 20; // squared collection radius
 const FLESH_PATH_INSET = 34;
 
 // ─── PALETTE ─────────────────────────────────────────────────────────────────
@@ -936,8 +935,8 @@ class GameScene extends Phaser.Scene {
       onComplete: () => popup.destroy()
     });
 
-    this.zombie.setTint(0xff3300);
-    this.time.delayedCall(90, () => this.zombie.clearTint());
+    this.zombie.setTint(0x44ff88);
+    this.time.delayedCall(120, () => this.zombie.clearTint());
   }
 
   // ─── Update ──────────────────────────────────────────────────────────────
@@ -1006,9 +1005,8 @@ class GameScene extends Phaser.Scene {
         item.sprite.x = cx;
         item.sprite.y = cy;
 
-        const ddx = cx - this.zombie.body.center.x;
-        const ddy = cy - this.zombie.body.center.y;
-        if (ddx * ddx + ddy * ddy < FLESH_R2) {
+        const zx = this.zombie.x, zy = this.zombie.y;
+        if (Math.abs(cx - zx) < 54 && cy < zy + 20 && cy > zy - 82) {
           Sfx.flesh();
           this._collectFlesh(item, cx, cy);
         }
